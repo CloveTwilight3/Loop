@@ -1,35 +1,16 @@
-import { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, TextChannel } from 'discord.js';
-import express, { Request, Response } from 'express';
-import dotenv from 'dotenv';
-
-dotenv.config();
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const express = require('express');
+require('dotenv').config();
 
 // Configuration
-const TOKEN = process.env.DISCORD_BOT_TOKEN!;
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID!;
+const TOKEN = process.env.DISCORD_BOT_TOKEN;
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const PORT = parseInt(process.env.PORT || '3000');
 
-// Enhanced Loop data interface
-interface LoopData {
-  glucose: number;
-  trend: string;
-  timestamp: string;
-  iob: number;
-  cob: number;
-  basalRate: number;
-  lastBolus?: {
-    amount: number;
-    timestamp: string;
-  };
-  loopStatus: 'closed' | 'open' | 'suspended';
-  batteryLevel?: number;
-  insulinRemaining?: number;
-}
-
 // In-memory storage for latest Loop data
-let currentLoopData: LoopData | null = null;
-let lastUpdateTime: Date | null = null;
+let currentLoopData = null;
+let lastUpdateTime = null;
 
 // Create Discord client
 const client = new Client({
@@ -68,7 +49,7 @@ const commands = [
 ].map(command => command.toJSON());
 
 // Register commands
-async function registerCommands(): Promise<void> {
+async function registerCommands() {
   try {
     const rest = new REST().setToken(TOKEN);
     
@@ -84,15 +65,15 @@ async function registerCommands(): Promise<void> {
   }
 }
 
-// Format data for different command types
-function formatGlucoseData(data: LoopData): string {
+// Format data functions
+function formatGlucoseData(data) {
   const timeSince = getTimeSinceUpdate();
   return `🩸 **Current Glucose**
 **Reading:** ${data.glucose} mg/dL ${data.trend}
 **Last Update:** ${timeSince}`;
 }
 
-function formatFullStatus(data: LoopData): string {
+function formatFullStatus(data) {
   const timeSince = getTimeSinceUpdate();
   const batteryInfo = data.batteryLevel ? `\n🔋 **Battery:** ${data.batteryLevel}%` : '';
   const insulinInfo = data.insulinRemaining ? `\n💧 **Insulin:** ${data.insulinRemaining}u remaining` : '';
@@ -106,7 +87,7 @@ function formatFullStatus(data: LoopData): string {
 ⏰ **Last Update:** ${timeSince}`;
 }
 
-function formatInsulinData(data: LoopData): string {
+function formatInsulinData(data) {
   const timeSince = getTimeSinceUpdate();
   let bolusInfo = '';
   
@@ -122,7 +103,7 @@ function formatInsulinData(data: LoopData): string {
 ⏰ **Last Update:** ${timeSince}`;
 }
 
-function formatLoopStatus(data: LoopData): string {
+function formatLoopStatus(data) {
   const timeSince = getTimeSinceUpdate();
   const statusEmoji = data.loopStatus === 'closed' ? '✅' : data.loopStatus === 'open' ? '⚠️' : '🛑';
   
@@ -133,7 +114,7 @@ ${statusEmoji} **Status:** ${data.loopStatus.toUpperCase()}
 💧 **Insulin Remaining:** ${data.insulinRemaining || 'Unknown'}u`;
 }
 
-function getTimeSinceUpdate(): string {
+function getTimeSinceUpdate() {
   if (!lastUpdateTime) return 'Never';
   
   const minutesAgo = Math.round((Date.now() - lastUpdateTime.getTime()) / (1000 * 60));
@@ -146,8 +127,8 @@ function getTimeSinceUpdate(): string {
   return `${hoursAgo} hours ago`;
 }
 
-function checkForAlerts(data: LoopData): string {
-  const alerts: string[] = [];
+function checkForAlerts(data) {
+  const alerts = [];
   
   // Glucose alerts
   if (data.glucose > 180) alerts.push('🔴 High glucose');
@@ -171,12 +152,12 @@ function checkForAlerts(data: LoopData): string {
 }
 
 // Helper function to send message to Discord channel
-async function sendToDiscordChannel(message: string): Promise<void> {
+async function sendToDiscordChannel(message) {
   const channelId = process.env.DISCORD_CHANNEL_ID;
   if (channelId) {
     const channel = client.channels.cache.get(channelId);
     if (channel && channel.isTextBased()) {
-      await (channel as TextChannel).send(message);
+      await channel.send(message);
     }
   }
 }
@@ -198,7 +179,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
   
-  let response: string;
+  let response;
   
   switch (commandName) {
     case 'glucose':
@@ -225,7 +206,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // Express routes
-app.get('/health', (req: Request, res: Response) => {
+app.get('/health', (req, res) => {
   const status = {
     bot: 'running',
     lastUpdate: lastUpdateTime?.toISOString() || 'never',
@@ -234,9 +215,9 @@ app.get('/health', (req: Request, res: Response) => {
   res.json(status);
 });
 
-app.post('/loop-data', async (req: Request, res: Response) => {
+app.post('/loop-data', (req, res) => {
   try {
-    const loopData: LoopData = req.body;
+    const loopData = req.body;
     
     // Validate required fields
     if (!loopData.glucose || !loopData.timestamp) {
@@ -251,8 +232,7 @@ app.post('/loop-data', async (req: Request, res: Response) => {
     
     // Send automatic alerts for critical values
     if (loopData.glucose > 250 || loopData.glucose < 60) {
-      const alertMessage = `🚨 **CRITICAL ALERT** 🚨\n${formatGlucoseData(loopData)}`;
-      await sendToDiscordChannel(alertMessage);
+      sendToDiscordChannel(`🚨 **CRITICAL ALERT** 🚨\n${formatGlucoseData(loopData)}`);
     }
     
     res.status(200).json({ message: 'Data received successfully' });
@@ -262,10 +242,10 @@ app.post('/loop-data', async (req: Request, res: Response) => {
   }
 });
 
-// Test endpoint with more realistic data
-app.get('/test-glucose', async (req: Request, res: Response) => {
+// Test endpoint
+app.get('/test-glucose', (req, res) => {
   try {
-    const mockData: LoopData = {
+    const mockData = {
       glucose: 145.0,
       trend: '↗️',
       timestamp: new Date().toISOString(),
@@ -274,7 +254,7 @@ app.get('/test-glucose', async (req: Request, res: Response) => {
       basalRate: 0.85,
       lastBolus: {
         amount: 3.5,
-        timestamp: new Date(Date.now() - 45 * 60 * 1000).toISOString() // 45 minutes ago
+        timestamp: new Date(Date.now() - 45 * 60 * 1000).toISOString()
       },
       loopStatus: 'closed',
       batteryLevel: 78,
@@ -284,7 +264,7 @@ app.get('/test-glucose', async (req: Request, res: Response) => {
     currentLoopData = mockData;
     lastUpdateTime = new Date();
 
-    await sendToDiscordChannel(formatFullStatus(mockData));
+    sendToDiscordChannel(formatFullStatus(mockData));
     res.json({ message: 'Test data sent to Discord!', data: mockData });
   } catch (error) {
     console.error('❌ Error sending test data:', error);
