@@ -8,7 +8,7 @@ let logger = Logger(label: "DiscordBot")
 // Configuration
 struct BotConfig {
     static let discordWebhookURL = ProcessInfo.processInfo.environment["DISCORD_WEBHOOK_URL"] ?? ""
-    static let port = Int(ProcessInfo.processInfo.environment["PORT"] ?? "8080") ?? 8080
+    static let port = Int(ProcessInfo.processInfo.environment["PORT"] ?? "0") ?? 0
 }
 
 // Loop data structure
@@ -76,12 +76,18 @@ final class LoopBot: @unchecked Sendable {
 @main
 struct DiscordBot {
     static func main() async throws {
-        // Use the correct Vapor initialization for async context
-        let app = try await Application.make(.detect())
+        // Configure the app with custom port
+        var env = try Environment.detect()
+        let app = try await Application.make(env)
+        
+        // Configure server with our port
+        let port = BotConfig.port == 0 ? 8000 : BotConfig.port
+        app.http.server.configuration.hostname = "127.0.0.1"
+        app.http.server.configuration.port = port
         
         let bot = LoopBot()
         
-        logger.info("Starting Loop Discord Bot on port \(BotConfig.port)")
+        logger.info("Starting Loop Discord Bot on port \(port)")
         
         // Health check endpoint
         app.get("health") { req in
