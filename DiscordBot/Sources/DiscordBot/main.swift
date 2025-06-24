@@ -1,17 +1,17 @@
 import Foundation
-import DiscordBM
 import AsyncHTTPClient
 import Logging
+import Vapor
 
 let logger = Logger(label: "DiscordBot")
 
-// Bot configuration
+// Configuration
 struct BotConfig {
-    static let token = ProcessInfo.processInfo.environment["DISCORD_BOT_TOKEN"] ?? ""
-    static let appId = ProcessInfo.processInfo.environment["DISCORD_APP_ID"] ?? ""
+    static let discordWebhookURL = ProcessInfo.processInfo.environment["DISCORD_WEBHOOK_URL"] ?? ""
+    static let port = Int(ProcessInfo.processInfo.environment["PORT"] ?? "8080") ?? 8080
 }
 
-// Loop data structure for future use
+// Loop data structure
 struct LoopData: Codable {
     let glucose: Double
     let trend: String
@@ -21,86 +21,101 @@ struct LoopData: Codable {
     let basalRate: Double
 }
 
-@main
-struct DiscordBot {
-    static func main() async {
-        logger.info("Starting Loop Discord Bot...")
-        
-        guard !BotConfig.token.isEmpty else {
-            logger.error("DISCORD_BOT_TOKEN environment variable not set")
-            logger.info("Please set your bot token in the .env file")
+// Discord webhook message
+struct DiscordMessage: Codable {
+    let content: String
+}
+
+class LoopBot {
+    private let httpClient: HTTPClient
+    
+    init() {
+        self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+    }
+    
+    func sendToDiscord(_ message: String) async throws {
+        guard !BotConfig.discordWebhookURL.isEmpty else {
+            logger.warning("Discord webhook URL not configured")
             return
         }
         
-        // Create HTTP client
-        let httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+        let payload = DiscordMessage(content: message)
+        let data = try JSONEncoder().encode(payload)
         
-        // Create bot gateway manager
-        let bot = await BotGatewayManager(
-            eventLoopGroup: httpClient.eventLoopGroup,
-            httpClient: httpClient,
-            token: BotConfig.token,
-            presence: .init(
-                activities: [.init(name: "Loop Health Data", type: .watching)],
-                status: .online,
-                afk: false
-            ),
-            intents: [.guildMessages, .messageContent]
-        )
+        var request = HTTPClientRequest(url: BotConfig.discordWebhookURL)
+        request.method = .POST
+        request.headers.add(name: "Content-Type", value: "application/json")
+        request.body = .bytes(data)
         
-        logger.info("Bot configured, attempting to connect...")
+        let response = try await httpClient.execute(request, timeout: .seconds(10))
+        logger.info("Discord message sent, status: \(response.status)")
+    }
+    
+    func formatLoopData(_ data: LoopData) -> String {
+        let trendArrow = data.trend
+        let timestamp = DateFormatter().string(from: data.timestamp)
         
-        // Add event handler - this is the correct API
-        await bot.addEventHandler { event in
-            logger.info("Received event: \(event.data)")
-            
-            switch event.data {
-            case .ready(let ready):
-                logger.info("Bot connected successfully as \(ready.user.username)!")
-                
-            case .messageCreate(let message):
-                logger.info("Message received: \(message.content ?? "No content")")
-                
-                // Simple ping/pong test
-                if message.content == "!ping" {
-                    Task {
-                        do {
-                            try await bot.client.createMessage(
-                                channelId: message.channel_id,
-                                payload: .init(content: "🏓 Pong! Loop Bot is online!")
-                            )
-                        } catch {
-                            logger.error("Failed to send message: \(error)")
-                        }
-                    }
-                }
-                
-                // Test glucose command
-                if message.content == "!glucose" {
-                    Task {
-                        do {
-                            try await bot.client.createMessage(
-                                channelId: message.channel_id,
-                                payload: .init(content: "🩸 Current: 125 mg/dL ↗️ (2 min ago)")
-                            )
-                        } catch {
-                            logger.error("Failed to send message: \(error)")
-                        }
-                    }
-                }
-                
-            default:
-                break
+        return """
+        🩸 **Loop Status Update**
+        **Glucose:** \(data.glucose) mg/dL \(trendArrow)
+        **IOB:** \(data.iob)u
+        **COB:** \(data.cob)g  
+        **Basal:** \(data.basalRate)u/h
+        **Time:** \(timestamp)
+        """
+    }
+}
+
+@main
+struct DiscordBot {
+    static func main() async throws {
+        let app = Application(.detect())
+        defer { app.shutdown() }
+        
+        let bot = LoopBot()
+        
+        logger.info("Starting Loop Discord Bot on port \(BotConfig.port)")
+        
+        // Health check endpoint
+        app.get("health") { req in
+            return "Loop Discord Bot is running!"
+        }
+        
+        // Webhook endpoint for Loop to send data
+        app.post("loop-data") { req -> HTTPStatus in
+            do {
+                let loopData = try req.content.decode(LoopData.self)
+                let message = bot.formatLoopData(loopData)
+                try await bot.sendToDiscord(message)
+                logger.info("Processed Loop data update")
+                return .ok
+            } catch {
+                logger.error("Failed to process Loop data: \(error)")
+                return .badRequest
             }
         }
         
-        // Connect to Discord
-        await bot.connect()
+        // Manual glucose check endpoint
+        app.get("glucose") { req -> String in
+            let mockData = LoopData(
+                glucose: 125.0,
+                trend: "↗️",
+                timestamp: Date(),
+                iob: 2.3,
+                cob: 15.0,
+                basalRate: 0.8
+            )
+            
+            Task {
+                try? await bot.sendToDiscord(bot.formatLoopData(mockData))
+            }
+            
+            return "Glucose data sent to Discord!"
+        }
         
-        logger.info("Bot is now running... Type !ping or !glucose in Discord to test")
-        logger.info("Press Ctrl+C to stop")
+        // Send startup message
+        try await bot.sendToDiscord("🚀 Loop Discord Bot started and ready to monitor!")
         
-        // Keep the bot running
-        try? await Task.sleep(nanoseconds: UInt64.max)
+        try await app.execute()
     }
 }
