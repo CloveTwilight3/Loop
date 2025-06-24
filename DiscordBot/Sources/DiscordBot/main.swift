@@ -26,7 +26,8 @@ struct DiscordMessage: Codable {
     let content: String
 }
 
-class LoopBot {
+// Make LoopBot Sendable to fix concurrency warnings
+final class LoopBot: @unchecked Sendable {
     private let httpClient: HTTPClient
     
     init() {
@@ -52,25 +53,31 @@ class LoopBot {
     }
     
     func formatLoopData(_ data: LoopData) -> String {
-        let trendArrow = data.trend
-        let timestamp = DateFormatter().string(from: data.timestamp)
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        let timestamp = formatter.string(from: data.timestamp)
         
         return """
         🩸 **Loop Status Update**
-        **Glucose:** \(data.glucose) mg/dL \(trendArrow)
+        **Glucose:** \(data.glucose) mg/dL \(data.trend)
         **IOB:** \(data.iob)u
         **COB:** \(data.cob)g  
         **Basal:** \(data.basalRate)u/h
         **Time:** \(timestamp)
         """
     }
+    
+    deinit {
+        try? httpClient.syncShutdown()
+    }
 }
 
 @main
 struct DiscordBot {
     static func main() async throws {
-        let app = Application(.detect())
-        defer { app.shutdown() }
+        // Use the correct Vapor initialization for async context
+        let app = try await Application.make(.detect())
         
         let bot = LoopBot()
         
@@ -82,7 +89,7 @@ struct DiscordBot {
         }
         
         // Webhook endpoint for Loop to send data
-        app.post("loop-data") { req -> HTTPStatus in
+        app.post("loop-data") { req async throws -> HTTPStatus in
             do {
                 let loopData = try req.content.decode(LoopData.self)
                 let message = bot.formatLoopData(loopData)
@@ -96,7 +103,7 @@ struct DiscordBot {
         }
         
         // Manual glucose check endpoint
-        app.get("glucose") { req -> String in
+        app.get("glucose") { req async throws -> String in
             let mockData = LoopData(
                 glucose: 125.0,
                 trend: "↗️",
@@ -106,16 +113,17 @@ struct DiscordBot {
                 basalRate: 0.8
             )
             
-            Task {
-                try? await bot.sendToDiscord(bot.formatLoopData(mockData))
-            }
-            
+            try await bot.sendToDiscord(bot.formatLoopData(mockData))
             return "Glucose data sent to Discord!"
         }
         
         // Send startup message
         try await bot.sendToDiscord("🚀 Loop Discord Bot started and ready to monitor!")
         
+        // Run the server
         try await app.execute()
+        
+        // Clean shutdown
+        try await app.asyncShutdown()
     }
 }
