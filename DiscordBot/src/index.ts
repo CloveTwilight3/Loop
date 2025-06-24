@@ -1,5 +1,5 @@
-import { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, CommandInteraction } from 'discord.js';
-import express from 'express';
+import { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, TextChannel } from 'discord.js';
+import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -49,7 +49,7 @@ const commands = [
 ].map(command => command.toJSON());
 
 // Register commands
-async function registerCommands() {
+async function registerCommands(): Promise<void> {
   try {
     const rest = new REST().setToken(TOKEN);
     
@@ -76,6 +76,17 @@ function formatLoopData(data: LoopData): string {
 **COB:** ${data.cob}g  
 **Basal:** ${data.basalRate}u/h
 **Time:** ${timestamp}`;
+}
+
+// Helper function to send message to Discord channel
+async function sendToDiscordChannel(message: string): Promise<void> {
+  const channelId = process.env.DISCORD_CHANNEL_ID;
+  if (channelId) {
+    const channel = client.channels.cache.get(channelId);
+    if (channel && channel.isTextBased()) {
+      await (channel as TextChannel).send(message);
+    }
+  }
 }
 
 // Bot event handlers
@@ -110,23 +121,16 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // Express routes for Loop integration
-app.get('/health', (req, res) => {
+app.get('/health', (req: Request, res: Response) => {
   res.send('Loop Discord Bot is running!');
 });
 
-app.post('/loop-data', (req, res) => {
+app.post('/loop-data', async (req: Request, res: Response) => {
   try {
     const loopData: LoopData = req.body;
     const message = formatLoopData(loopData);
     
-    // Send to Discord channel (you'll need to set a channel ID)
-    const channelId = process.env.DISCORD_CHANNEL_ID;
-    if (channelId) {
-      const channel = client.channels.cache.get(channelId);
-      if (channel?.isTextBased()) {
-        channel.send(message);
-      }
-    }
+    await sendToDiscordChannel(message);
     
     console.log('✅ Processed Loop data update');
     res.status(200).send('OK');
@@ -136,25 +140,23 @@ app.post('/loop-data', (req, res) => {
   }
 });
 
-app.get('/glucose', async (req, res) => {
-  const mockData: LoopData = {
-    glucose: 125.0,
-    trend: '↗️',
-    timestamp: new Date().toISOString(),
-    iob: 2.3,
-    cob: 15.0,
-    basalRate: 0.8
-  };
+app.get('/glucose', async (req: Request, res: Response) => {
+  try {
+    const mockData: LoopData = {
+      glucose: 125.0,
+      trend: '↗️',
+      timestamp: new Date().toISOString(),
+      iob: 2.3,
+      cob: 15.0,
+      basalRate: 0.8
+    };
 
-  const channelId = process.env.DISCORD_CHANNEL_ID;
-  if (channelId) {
-    const channel = client.channels.cache.get(channelId);
-    if (channel?.isTextBased()) {
-      await channel.send(formatLoopData(mockData));
-    }
+    await sendToDiscordChannel(formatLoopData(mockData));
+    res.send('Glucose data sent to Discord!');
+  } catch (error) {
+    console.error('❌ Error sending glucose data:', error);
+    res.status(500).send('Error sending data');
   }
-
-  res.send('Glucose data sent to Discord!');
 });
 
 // Start the bot and server
