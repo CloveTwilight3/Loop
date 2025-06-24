@@ -1,14 +1,14 @@
 import Foundation
+import DiscordBM
 import AsyncHTTPClient
 import Logging
-import Vapor
 
 let logger = Logger(label: "DiscordBot")
 
-// Configuration
+// Bot configuration
 struct BotConfig {
-    static let discordWebhookURL = ProcessInfo.processInfo.environment["DISCORD_WEBHOOK_URL"] ?? ""
-    static let port = Int(ProcessInfo.processInfo.environment["PORT"] ?? "0") ?? 0
+    static let token = ProcessInfo.processInfo.environment["DISCORD_BOT_TOKEN"] ?? ""
+    static let guildId = ProcessInfo.processInfo.environment["DISCORD_GUILD_ID"] ?? ""
 }
 
 // Loop data structure
@@ -21,115 +21,139 @@ struct LoopData: Codable {
     let basalRate: Double
 }
 
-// Discord webhook message
-struct DiscordMessage: Codable {
-    let content: String
-}
-
-// Make LoopBot Sendable to fix concurrency warnings
-final class LoopBot: @unchecked Sendable {
-    private let httpClient: HTTPClient
-    
-    init() {
-        self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
-    }
-    
-    func sendToDiscord(_ message: String) async throws {
-        guard !BotConfig.discordWebhookURL.isEmpty else {
-            logger.warning("Discord webhook URL not configured")
-            return
-        }
-        
-        let payload = DiscordMessage(content: message)
-        let data = try JSONEncoder().encode(payload)
-        
-        var request = HTTPClientRequest(url: BotConfig.discordWebhookURL)
-        request.method = .POST
-        request.headers.add(name: "Content-Type", value: "application/json")
-        request.body = .bytes(data)
-        
-        let response = try await httpClient.execute(request, timeout: .seconds(10))
-        logger.info("Discord message sent, status: \(response.status)")
-    }
-    
-    func formatLoopData(_ data: LoopData) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        let timestamp = formatter.string(from: data.timestamp)
-        
-        return """
-        🩸 **Loop Status Update**
-        **Glucose:** \(data.glucose) mg/dL \(data.trend)
-        **IOB:** \(data.iob)u
-        **COB:** \(data.cob)g  
-        **Basal:** \(data.basalRate)u/h
-        **Time:** \(timestamp)
-        """
-    }
-    
-    deinit {
-        try? httpClient.syncShutdown()
-    }
-}
-
 @main
 struct DiscordBot {
     static func main() async throws {
-        // Configure the app with custom port
-        var env = try Environment.detect()
-        let app = try await Application.make(env)
+        logger.info("Starting Loop Discord Bot...")
         
-        // Configure server with our port
-        let port = BotConfig.port == 0 ? 8000 : BotConfig.port
-        app.http.server.configuration.hostname = "127.0.0.1"
-        app.http.server.configuration.port = port
-        
-        let bot = LoopBot()
-        
-        logger.info("Starting Loop Discord Bot on port \(port)")
-        
-        // Health check endpoint
-        app.get("health") { req in
-            return "Loop Discord Bot is running!"
+        guard !BotConfig.token.isEmpty else {
+            logger.error("DISCORD_BOT_TOKEN environment variable not set")
+            return
         }
         
-        // Webhook endpoint for Loop to send data
-        app.post("loop-data") { req async throws -> HTTPStatus in
-            do {
-                let loopData = try req.content.decode(LoopData.self)
-                let message = bot.formatLoopData(loopData)
-                try await bot.sendToDiscord(message)
-                logger.info("Processed Loop data update")
-                return .ok
-            } catch {
-                logger.error("Failed to process Loop data: \(error)")
-                return .badRequest
+        // Create HTTP client
+        let httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+        
+        // Create bot gateway manager (this is the correct syntax from examples)
+        let bot = await BotGatewayManager(
+            eventLoopGroup: httpClient.eventLoopGroup,
+            httpClient: httpClient,
+            token: BotConfig.token,
+            presence: .init(
+                activities: [.init(name: "Loop Health Data", type: .watching)],
+                status: .online,
+                afk: false
+            ),
+            intents: [.guildMessages, .messageContent]
+        )
+        
+        logger.info("Bot configured, attempting to connect...")
+        
+        // Add event handlers (this is the correct syntax from official examples)
+        await bot.addEventHandler { event in
+            logger.info("Received event of type: \(type(of: event.data))")
+            
+            switch event.data {
+            case .ready(let ready):
+                logger.info("✅ Bot connected successfully as \(ready.user.username)!")
+                
+                // Register slash commands after connection
+                Task {
+                    await registerSlashCommands(bot: bot)
+                }
+                
+            case .interactionCreate(let interaction):
+                await handleSlashCommand(interaction: interaction, bot: bot)
+                
+            case .messageCreate(let message):
+                // Handle regular messages for testing
+                if message.content == "!ping" {
+                    Task {
+                        try? await bot.client.createMessage(
+                            channelId: message.channel_id,
+                            payload: .init(content: "🏓 Pong! Loop Bot is online!")
+                        )
+                    }
+                }
+                
+            default:
+                break
             }
         }
         
-        // Manual glucose check endpoint
-        app.get("glucose") { req async throws -> String in
-            let mockData = LoopData(
-                glucose: 125.0,
-                trend: "↗️",
-                timestamp: Date(),
-                iob: 2.3,
-                cob: 15.0,
-                basalRate: 0.8
-            )
-            
-            try await bot.sendToDiscord(bot.formatLoopData(mockData))
-            return "Glucose data sent to Discord!"
+        // Connect to Discord
+        await bot.connect()
+        
+        logger.info("🚀 Bot is now running... Use /glucose, /status, or /insulin commands!")
+        
+        // Keep running
+        try await Task.sleep(nanoseconds: UInt64.max)
+    }
+}
+
+// Register slash commands
+func registerSlashCommands(bot: BotGatewayManager) async {
+    let commands: [Payloads.ApplicationCommandCreate] = [
+        .init(
+            name: "glucose",
+            description: "Get current blood glucose reading"
+        ),
+        .init(
+            name: "status", 
+            description: "Get full Loop status (BG, IOB, COB, basal)"
+        ),
+        .init(
+            name: "insulin",
+            description: "Get detailed insulin information"
+        )
+    ]
+    
+    for command in commands {
+        do {
+            if BotConfig.guildId.isEmpty {
+                // Global commands
+                try await bot.client.bulkSetGlobalApplicationCommands(payload: commands)
+                logger.info("✅ Registered global slash commands")
+                break
+            } else {
+                // Guild-specific commands (faster for testing)
+                try await bot.client.bulkSetGuildApplicationCommands(
+                    guildId: BotConfig.guildId,
+                    payload: commands
+                )
+                logger.info("✅ Registered guild slash commands")
+                break
+            }
+        } catch {
+            logger.error("❌ Failed to register commands: \(error)")
         }
-        
-        // Send startup message
-        try await bot.sendToDiscord("🚀 Loop Discord Bot started and ready to monitor!")
-        
-        // Run the server
-        try await app.execute()
-        
-        // Clean shutdown
-        try await app.asyncShutdown()
+    }
+}
+
+// Handle slash commands
+func handleSlashCommand(interaction: Interaction, bot: BotGatewayManager) async {
+    guard case .applicationCommand(let data) = interaction.data else { return }
+    
+    let response: String
+    switch data.name {
+    case "glucose":
+        response = "🩸 Current: 125 mg/dL ↗️ (2 min ago)"
+    case "status":
+        response = "📊 **Loop Status**\n🩸 BG: 125↗️\n💉 IOB: 2.3u\n🍞 COB: 15g\n⚡ Basal: 0.8u/h"
+    case "insulin":
+        response = "💉 **Insulin Status**\n📈 IOB: 2.3u\n💊 Last bolus: 1.5u (45 min ago)\n⚡ Current basal: 0.8u/h"
+    default:
+        response = "❓ Unknown command"
+    }
+    
+    do {
+        try await bot.client.createInteractionResponse(
+            id: interaction.id,
+            token: interaction.token,
+            payload: .channelMessageWithSource(.init(content: response))
+        )
+        logger.info("✅ Responded to /\(data.name) command")
+    } catch {
+        logger.error("❌ Failed to respond to command: \(error)")
     }
 }
