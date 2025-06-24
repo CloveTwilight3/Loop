@@ -23,9 +23,10 @@ struct LoopData: Codable {
 
 class LoopDiscordBot {
     private let bot: BotGatewayManager
+    private let httpClient: HTTPClient
     
     init() async {
-        let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
+        self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
         self.bot = await BotGatewayManager(
             eventLoopGroup: httpClient.eventLoopGroup,
             httpClient: httpClient,
@@ -42,16 +43,17 @@ class LoopDiscordBot {
     func start() async {
         logger.info("Starting Loop Discord Bot...")
         
-        // Register slash commands
-        await registerSlashCommands()
-        
         // Set up event handlers
-        await bot.addEventHandler { event in
+        await bot.addEventHandler(name: "interactionCreate") { event in
             await self.handleEvent(event)
         }
         
         // Connect to Discord
         await bot.connect()
+        
+        // Register slash commands after connection
+        try? await Task.sleep(nanoseconds: 2_000_000_000) // Wait 2 seconds
+        await registerSlashCommands()
     }
     
     private func registerSlashCommands() async {
@@ -61,7 +63,7 @@ class LoopDiscordBot {
                 description: "Get current blood glucose reading"
             ),
             .init(
-                name: "status",
+                name: "status", 
                 description: "Get full Loop status (BG, IOB, COB, basal)"
             ),
             .init(
@@ -70,8 +72,14 @@ class LoopDiscordBot {
             )
         ]
         
-        // Register commands (you'll need to implement this)
-        logger.info("Slash commands registered")
+        for command in commands {
+            do {
+                let _ = try await bot.client.createGlobalApplicationCommand(payload: command)
+                logger.info("Registered command: \(command.name)")
+            } catch {
+                logger.error("Failed to register command \(command.name): \(error)")
+            }
+        }
     }
     
     private func handleEvent(_ event: Gateway.Event) async {
@@ -84,7 +92,7 @@ class LoopDiscordBot {
     }
     
     private func handleSlashCommand(_ interaction: Interaction) async {
-        guard let data = interaction.data?.asApplicationCommand else { return }
+        guard case .applicationCommand(let data) = interaction.data else { return }
         
         let response: String
         switch data.name {
@@ -98,8 +106,21 @@ class LoopDiscordBot {
             response = "Unknown command"
         }
         
-        // Send response (you'll need to implement this)
-        logger.info("Responding to command: \(data.name)")
+        let responsePayload = Payloads.InteractionResponse(
+            type: .channelMessageWithSource,
+            data: .init(content: response)
+        )
+        
+        do {
+            try await bot.client.createInteractionResponse(
+                id: interaction.id,
+                token: interaction.token,
+                payload: responsePayload
+            )
+            logger.info("Responded to command: \(data.name)")
+        } catch {
+            logger.error("Failed to respond to command: \(error)")
+        }
     }
 }
 
